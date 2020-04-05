@@ -29,10 +29,10 @@ class LogItem {
 public:
 	LogItem(uint64_t time, int value): time(time), value(value) {;}
 	LogItem() {;}
-	uint64_t getTime() {
+	uint64_t get_time() const {
 		return time;
 	}
-	int getValue() {
+	int get_value() const {
 		return value;
 	}
 private:
@@ -40,135 +40,128 @@ private:
 	int value;
 };
 
-auto cmp = [](LogItem first, LogItem second) { return first.getTime() < second.getTime(); };
-
 class RingBuffer {
 public:
-	RingBuffer(): // buffer(new LogItem[MAX_SIZE]), curSize(0), headPos(0), tailPos(0),
-	minHeap(priority_queue<LogItem, vector<LogItem>, decltype(cmp)> (cmp)) {
+	RingBuffer(): cur_size(0), tail_pos(0x7fffffff) {
 	};
+
+	void move_tail_to_non_empty_bucket() {
+		while (buffer[tail_pos].size() == 0) tail_pos = (tail_pos + 1) % MAX_SIZE;
+	}
 	LogItem pop_front(SpinLock& lock) {
-		if (minHeap.size() == 0) {
+		if (cur_size == 0) {
 			return LogItem(-1,-1);
 		}
 		LogItem ret;
 		lock.lock();
-//		curSize--;
-//		ret = &buffer[headPos];
-//		headPos = (headPos - 1) < 0 ? headPos + MAX_SIZE - 1 :  headPos - 1;
-		ret = (minHeap.top());
-		minHeap.pop();
+		cur_size--;
+		move_tail_to_non_empty_bucket();
+		ret = buffer[tail_pos].front();
+		buffer[tail_pos].pop();
 		lock.unlock();
 		return ret;
 	}
 
-	void push_back(SpinLock& lock, LogItem* item) {
-//		cout << minHeap.size() << endl;
-		if (minHeap.size() == MAX_SIZE) return;
+	void push_back(SpinLock& lock, const LogItem& item) {
 		lock.lock();
+		int index = item.get_time() % MAX_SIZE;
+		if (cur_size != 0) move_tail_to_non_empty_bucket();
 
-//		if (curSize == 0 && headPos == tailPos) ;
-//		else tailPos = tailPos - 1 < 0 ? tailPos + MAX_SIZE - 1 : tailPos - 1;
-//
-//		buffer[tailPos] = *item;
-//		curSize++;
-		minHeap.push(*item);
+		if (cur_size == 0) tail_pos = index;
+		else if (buffer[tail_pos].front().get_time() > item.get_time()) tail_pos = index;
+
+		buffer[index].push(item);
+		cur_size++;
 		lock.unlock();
 	}
 
 	bool empty() {
-		return minHeap.size() == 0;
+		return cur_size == 0;
 	}
 
-	int getCurSize() {
-		return minHeap.size();
+	int getCurSize() const {
+		return cur_size;
 	}
 private:
-	static const int MAX_SIZE = 4e6;
-//	LogItem* buffer;
-//	int headPos;
-//	int tailPos;
-//	int curSize;
-	priority_queue<LogItem, vector<LogItem>, decltype(cmp)> minHeap;
+	static const int MAX_SIZE = 1e5;
+	queue<LogItem> buffer[MAX_SIZE];
+	int tail_pos;
+	int cur_size;
 };
 
 class IntLogger {
 public:
-	IntLogger(string& filename, int window): window(window), stopConsumer(false) {
-		outFile.open(filename);
-		thread a = thread(&IntLogger::consumeLog, this);
-		list.push_back(move(a));
+	IntLogger(string filename, int window): window(window), stop_consumer(false) {
+		out_file.open(filename);
+		consumer_thread = thread(&IntLogger::consume_log, this);
 	}
 
 	void Log(uint64_t time, int value);
 	~IntLogger() {
-		stopConsumer = true;
-		for (thread& i : list) i.join();
-		outFile.close();
+		stop_consumer = true;
+		consumer_thread.join();
+		out_file.close();
 	}
 
-	SpinLock& getSpinLock() {
-		return spinLock;
-	}
-
-	ofstream& getOutFile() {
-		return outFile;
-	}
-
-	int getWindow() {
+	int get_window() const {
 		return window;
 	}
 
-	void consumeLog() {
+	void consume_log() {
 		while (true) {
 			uint64_t begin = time_now();
 			LogItem item = buffer.pop_front(spinLock);
 
-        	if (item.getTime() != -1) {
-			    outFile << item.getTime() << "," << item.getValue() << endl;
+        	if (item.get_time() != -1) {
+			    out_file << item.get_time() << "," << item.get_value() << '\n';
         	}
 
 			while (time_now() - begin < 1L) ;
-			if (stopConsumer && buffer.empty()) break;
+			if (stop_consumer && buffer.empty()) break;
 		}
 	}
 
 private:
 	int window;
-	ofstream outFile;
+	ofstream out_file;
 	SpinLock spinLock;
-	vector<thread> list;
-	thread consumerThread;
+	thread consumer_thread;
 	RingBuffer buffer;
-	bool stopConsumer;
+	bool stop_consumer;
 };
 
 void IntLogger::Log(uint64_t time, int value) {
     uint64_t start = time_now();
-    buffer.push_back(spinLock, new LogItem(time, value));
+    buffer.push_back(spinLock, LogItem(time, value));
 }
 
 void producer(IntLogger& logger) {
-	for (int i = 0; i < 500000; ++i) {
+	for (int i = 0; i < 1000000 / 2; ++i) {
 		logger.Log(time_now(), i);
 	}
 }
 
-void run() {
-	string fileName = "test.csv";
-	IntLogger logger(fileName, 10000000);
+void app(IntLogger& logger) {
+}
 
+void test_run() {
+	string file_name = "test.csv";
+	IntLogger logger(file_name, 100000);
+    long long start = time_now();
 	thread t1(producer, ref(logger));
 	thread t2(producer, ref(logger));
-
 	t1.join();
 	t2.join();
+	long long end = time_now();
+
+	// 2 thread(each 500k records) total time = 1.23
+	// 1 thread(1m records) total time = 1.17
+	cout << (end - start) / 1e6 << "us" << endl;
+	cout << "end" << endl;
 }
 
 int main() {
-    long long start = time_now();
-    run();
-	cout << (time_now() - start) / 1000000.0 << endl;
+    test_run();
 	return 0;
 }
 
